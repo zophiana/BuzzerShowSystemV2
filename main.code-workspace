@@ -1,0 +1,26 @@
+{
+	"folders": [
+		{
+			"name": "BSS (Root)",
+			"path": "."
+		},
+		{
+			"name": "Main Controller",
+			"path": "bss-controller"
+		},
+		{
+			"name": "Buzzer",
+			"path": "bss-buzzer"
+		}
+	],
+	"extensions": {
+		"recommendations": [
+			"ms-vscode.cpptools",
+			"ms-vscode.cpptools-themes",
+			"platformio.platformio-ide"
+		]
+	},
+	"settings": {
+		"editor.formatOnSave": true
+	}
+}

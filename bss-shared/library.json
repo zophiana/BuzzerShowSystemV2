@@ -1,0 +1,9 @@
+{
+    "name": "BSS Shared",
+    "version": "0.0.1",
+    "description": "the code that can be shared between clients and controller",
+    "keywords": "",
+    "license": "MIT",
+    "frameworks": "arduino",
+    "platforms": "espressif32"
+}
