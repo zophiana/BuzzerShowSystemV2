@@ -1,0 +1,1 @@
+write me a documentation for espnow so that i can use and understand the init, send, add_peer, grouping functions, the storage functions. I want also some basic examples using the arduino framework and the library.
