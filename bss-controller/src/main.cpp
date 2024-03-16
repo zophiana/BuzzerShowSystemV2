@@ -1,3 +1,7 @@
+/*
+  Copyright © 2024 Leonard Sebastian Schwennesen. All rights reserved.
+*/
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
@@ -6,21 +10,14 @@
 #include "bss_shared.h"
 
 uint8_t broadcast_address[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-esp_now_peer_info broadcast_peer;
-
-// REPLACE WITH YOUR RECEIVER MAC Address
-uint8_t addresses[][6] = {
-    {0xA0, 0xB7, 0x65, 0x67, 0xCA, 0xD4},
-    {0xA0, 0xB7, 0x65, 0x4C, 0xBF, 0x04},
-    {0xA0, 0xB7, 0x65, 0x58, 0x69, 0x28},
-};
+esp_now_peer_info_t broadcast_peer;
 
 typedef struct client_struct
 {
     uint8_t id;
-    uint8_t *mac;
+    uint8_t mac[6];
     uint64_t timeout;
-    esp_now_peer_info peer;
+    esp_now_peer_info_t peer;
     client_struct *next;
 } client_struct;
 
@@ -31,28 +28,14 @@ typedef struct
     uint8_t b;
 } rgb_t;
 
-// Structure example to receive data
-// Must match the sender structure
-typedef struct
-{
-    char type;
-    uint8_t a;
-    uint8_t b;
-    uint8_t c;
-} struct_message;
-
-time_t send_time = 0;
-bool test = false;
-client_struct *new_client_g = NULL;
-
-// Create a struct_message called myData
-struct_message myData;
 client_struct *clients = NULL;
 
-uint8_t *msg_buf;
+SemaphoreHandle_t xMutex = NULL;
+
+uint8_t msg_buf[250];
 #define MSG_CLEAR_BUF memset(msg_buf, 0, 8 * sizeof(uint8_t))
 
-// reactesp::ReactESP app;
+reactesp::ReactESP app;
 
 void send_msg(const uint8_t *mac_addr, const uint8_t *data, const uint8_t size);
 
@@ -77,11 +60,11 @@ inline void copy_mac(uint8_t *dest, const uint8_t *source)
     memcpy(dest, source, 6);
 }
 
-void add_peer(esp_now_peer_info *peer_info, uint8_t *peer_mac)
+void add_peer(esp_now_peer_info_t *peer_info, uint8_t *peer_mac)
 {
     copy_mac(peer_info->peer_addr, peer_mac);
-    peer_info->channel = ESP_NOW_BSS_CHANNEL;
-    peer_info->encrypt = ESP_NOW_BSS_ENCRYPT;
+    peer_info->channel = BSS_ESP_NOW_CHANNEL;
+    peer_info->encrypt = BSS_ESP_NOW_ENCRYPT;
 
     esp_now_add_peer(peer_info);
 }
@@ -95,7 +78,7 @@ void fill_msg_buf(uint8_t *buf, uint8_t id, rgb_t rgb)
 {
     buf[0] = id;
     buf[1] = 4;
-    buf[2] = MSG_SET_NEOPIXEL_COLOR;
+    buf[2] = BSS_MSG_SET_NEOPIXEL_COLOR;
     buf[3] = rgb.r;
     buf[4] = rgb.g;
     buf[5] = rgb.b;
@@ -104,103 +87,95 @@ void fill_msg_buf(uint8_t *buf, uint8_t id, rgb_t rgb)
 // callback function that will be executed when data is received
 void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
 {
-    uint8_t id = data[0];
-    client_struct *current_client = clients;
-
-    while (current_client != NULL)
+    if (xSemaphoreTake(xMutex, portMAX_DELAY))
     {
-        if (current_client->id == id)
+        uint8_t id = data[0];
+        client_struct *current_client = clients;
+
+        while (current_client != NULL)
         {
-            current_client->timeout = millis();
-            break;
-        }
-
-        current_client = current_client->next;
-    }
-
-    PrintMac(mac);
-    // Serial.println(millis());
-    // Serial.print("Bytes received: ");
-    // Serial.println(len);
-    // Serial.println(id);
-    // Serial.println("current client: ");
-    // Serial.println(current_client == NULL);
-    // if (current_client != NULL)
-    // Serial.println(current_client->id);
-    // Serial.println(clients == NULL);
-
-    if (data[2] == MSG_BUZZER_PRESSED)
-    {
-        // Serial.println("Buzzer Pressed");
-
-        if (current_client != NULL)
-        {
-            uint8_t i = 0;
-            client_struct *tmp_client = clients;
-
-            while (tmp_client != NULL)
+            if (current_client->id == id)
             {
-                // Serial.print("add msg with id: ");
-                fill_msg_buf(&msg_buf[i], tmp_client->id, {1, 1, 1});
-                i += 6;
-                tmp_client = tmp_client->next;
+                current_client->timeout = millis();
+                break;
             }
 
-            send_msg(broadcast_address, msg_buf, i);
+            current_client = current_client->next;
+        }
 
-            /*app.onDelay(1000, []()
-                        {
+        PrintMac(mac);
+
+        if (data[2] == BSS_MSG_BUZZER_PRESSED)
+        {
+            // Serial.println("Buzzer Pressed");
+
+            if (current_client != NULL)
+            {
+                uint8_t i = 0;
+                client_struct *tmp_client = clients;
+
+                for (; tmp_client != NULL; i += 6)
+                {
+                    // Serial.print("add msg with id: ");
+                    fill_msg_buf(&msg_buf[i], tmp_client->id, {1, 1, 1});
+                    tmp_client = tmp_client->next;
+                }
+
+                send_msg(broadcast_address, msg_buf, i);
+
+                app.onDelay(1000, []()
+                            {
                             uint8_t i = 0;
                             client_struct *tmp_client = clients;
 
-                            while (tmp_client != NULL)
+                            for (; tmp_client != NULL; i += 6)
                             {
-                                //Serial.println("add msg");
+                                // Serial.print("add msg with id: ");
                                 fill_msg_buf(&msg_buf[i], tmp_client->id, {0, 0, 0});
-                                i += 6;
                                 tmp_client = tmp_client->next;
                             }
 
-                            send_msg(broadcast_address, msg_buf, i); });*/
+                            send_msg(broadcast_address, msg_buf, i); });
+            }
         }
-    }
-    else if (data[2] == MSG_PAIRING_REQUEST)
-    {
-        Serial.println("Pairing Request");
-
-        if (test != true)
+        else if (data[2] == BSS_MSG_PAIRING_REQUEST)
         {
+            Serial.println("Pairing Request");
+
             msg_buf[0] = id;
             msg_buf[1] = 1;
-            msg_buf[2] = MSG_PAIRING_ACCEPTED;
-
-            uint8_t *new_mac = (uint8_t *)malloc(6 * sizeof(uint8_t));
-            copy_mac(new_mac, mac);
-
-            client_struct *new_client = (client_struct *)malloc(sizeof(client_struct));
-            new_client->id = id;
-            new_client->mac = new_mac;
-            new_client->timeout = millis();
-            new_client->next = NULL;
-
-            memset(&new_client->peer, 1, sizeof(esp_now_peer_info));
-
-            PrintMac(mac);
-            PrintMac(new_mac);
-
-            // esp_now_peer_info *tmp_peer = (esp_now_peer_info *)malloc(sizeof(esp_now_peer_info));
-
-            memcpy(new_client->peer.peer_addr, mac, 6);
-            new_client->peer.channel = ESP_NOW_BSS_CHANNEL;
-            new_client->peer.encrypt = false;
+            msg_buf[2] = BSS_MSG_PAIRING_ACCEPTED;
 
             if (current_client == NULL)
+            {
+                client_struct *new_client = (client_struct *)malloc(sizeof(client_struct));
+                new_client->id = id;
+                copy_mac(new_client->mac, mac);
+                new_client->timeout = millis();
+                new_client->next = NULL;
+
+                memset(&new_client->peer, 0, sizeof(esp_now_peer_info_t));
+
+                PrintMac(new_client->mac);
+
+                copy_mac(new_client->peer.peer_addr, mac);
+                new_client->peer.channel = BSS_ESP_NOW_CHANNEL;
+                new_client->peer.encrypt = BSS_ESP_NOW_ENCRYPT;
+
                 add_client(new_client);
 
-            // Serial.println("add client");
-            new_client_g = new_client;
-            test = true;
+                current_client = new_client;
+            }
+
+            Serial.println("Add peer: ");
+            if (!esp_now_is_peer_exist(mac))
+                esp_now_add_peer(&current_client->peer);
+
+            Serial.println("add client");
+            send_msg(current_client->mac, msg_buf, 3);
         }
+
+        xSemaphoreGive(xMutex);
     }
 }
 
@@ -235,8 +210,6 @@ void setup()
     // Initialize Serial Monitor
     Serial.begin(115200);
 
-    msg_buf = (uint8_t *)malloc(250 * sizeof(uint8_t));
-
     // Set device as a Wi-Fi Station
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
@@ -249,7 +222,8 @@ void setup()
         return;
     }
     Serial.println();
-    delay(100);
+
+    xMutex = xSemaphoreCreateMutex();
 
     // Once ESPNow is successfully Init, we will register for recv CB to
     // get recv packer info
@@ -271,29 +245,9 @@ void setup()
 
 void loop()
 {
-    if (test == true)
+    if (xSemaphoreTake(xMutex, 10))
     {
-
-        Serial.println("test");
-
-        Serial.println("Add peer: ");
-        int err = esp_now_add_peer(&new_client_g->peer);
-        Serial.println("#################################################################");
-        Serial.printf("%X", err);
-        Serial.println();
-
-        // Serial.println("Add peer: ");
-        // err = esp_now_add_peer(tmp_peer);
-        // Serial.println("#################################################################");
-        // Serial.printf("%X", err);
-        // Serial.println();
-
-        // add_peer(tmp_peer, new_mac);
-
-        // Serial.println("foo");
-
-        send_msg(new_client_g->mac, msg_buf, 3);
-        test = false;
+        app.tick();
+        xSemaphoreGive(xMutex);
     }
-    // app.tick();
 }

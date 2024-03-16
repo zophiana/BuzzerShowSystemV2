@@ -1,3 +1,7 @@
+/*
+  Copyright © 2024 Leonard Sebastian Schwennesen. All rights reserved.
+*/
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
@@ -6,25 +10,15 @@
 #include "bss_shared.h"
 
 uint8_t broadcast_address[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-esp_now_peer_info broadcast_peer;
+esp_now_peer_info_t broadcast_peer;
 
 #define LED_PIN 26
 #define BUZZER_PIN 25
 
-// Structure example to receive data
-// Must match the sender structure
-// typedef struct
-//{
-//    uint8_t id;
-//    uint8_t len;
-//} struct_message;
-
-// Create a struct_message called myData
-// struct_message myData;
-uint8_t *msg_buf;
+uint8_t msg_buf[250];
 #define MSG_CLEAR_BUF memset(msg_buf, 0, 8 * sizeof(uint8_t))
 
-uint8_t *my_mac;
+uint8_t my_mac[6];
 uint8_t my_id;
 
 uint8_t controller_mac[6];
@@ -45,8 +39,8 @@ inline void copy_mac(uint8_t *dest, const uint8_t *source)
 void add_peer(esp_now_peer_info *peer_info, uint8_t *peer_mac)
 {
     copy_mac(peer_info->peer_addr, peer_mac);
-    peer_info->channel = ESP_NOW_BSS_CHANNEL;
-    peer_info->encrypt = ESP_NOW_BSS_ENCRYPT;
+    peer_info->channel = BSS_ESP_NOW_CHANNEL;
+    peer_info->encrypt = BSS_ESP_NOW_ENCRYPT;
 
     esp_now_add_peer(peer_info);
 }
@@ -60,8 +54,6 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 
     // Serial.printf("msg delivered: %i\n", millis() - send_time);
 }
-
-// memset(controller_mac, 0, 6 * sizeof(uint8_t));
 
 bool controller_mac_is_empty()
 {
@@ -93,7 +85,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
         Serial.println("my id: ");
         Serial.println(my_id);
 
-        for (uint8_t i = 0; i < len; i++)
+        for (uint8_t i = 0; i < len;)
         {
             if (data[i] == my_id)
             {
@@ -114,12 +106,12 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
         {
             switch (start_ptr[2])
             {
-            case MSG_SET_NEOPIXEL_COLOR:
-                digitalWrite(LED_PIN, start_ptr[2]);
-                // digitalWrite(LED_PIN, data[start + 4]);
+            case BSS_MSG_SET_NEOPIXEL_COLOR:
+                digitalWrite(LED_PIN, start_ptr[3]);
+                digitalWrite(LED_PIN, start_ptr[4]);
                 break;
 
-            case MSG_PAIRING_ACCEPTED:
+            case BSS_MSG_PAIRING_ACCEPTED:
                 Serial.println("Pairing Accepted");
 
                 if (pairing_loop != NULL)
@@ -134,12 +126,8 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
                     copy_mac(controller_mac, mac);
 
                     copy_mac(controller_peer.peer_addr, controller_mac);
-                    Serial.println("some 4");
                     esp_now_add_peer(&controller_peer);
-                    Serial.println("some 5");
                 }
-
-                Serial.println("some 6");
 
                 break;
 
@@ -178,15 +166,12 @@ void setup()
     WiFi.setSleep(false);
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
 
-    my_mac = (uint8_t *)malloc(6 * sizeof(uint8_t));
     WiFi.macAddress(my_mac);
 
     for (uint8_t i = 0; i < 6; i++)
     {
         my_id += my_mac[i];
     }
-
-    msg_buf = (uint8_t *)malloc(8 * sizeof(uint8_t));
 
     xMutex = xSemaphoreCreateMutex();
 
@@ -197,7 +182,6 @@ void setup()
         return;
     }
     Serial.println();
-    delay(100);
 
     // Once ESPNow is successfully Init, we will register for recv CB to
     // get recv packer info
@@ -210,8 +194,8 @@ void setup()
     // Register peer
     add_peer(&broadcast_peer, broadcast_address);
 
-    controller_peer.channel = 0;
-    controller_peer.encrypt = false;
+    controller_peer.channel = BSS_ESP_NOW_CHANNEL;
+    controller_peer.encrypt = BSS_ESP_NOW_ENCRYPT;
 
     pinMode(LED_PIN, OUTPUT);
     pinMode(BUZZER_PIN, INPUT_PULLUP);
@@ -239,29 +223,23 @@ void loop()
             {
                 msg_buf[0] = my_id;
                 msg_buf[1] = 1;
-                msg_buf[2] = MSG_BUZZER_PRESSED;
+                msg_buf[2] = BSS_MSG_BUZZER_PRESSED;
                 send_msg(controller_mac, msg_buf, 3);
             }
         }
-        else if ((!paired) && (pairing_loop == NULL))
+        else if (!paired && pairing_loop == NULL)
         {
-            Serial.println("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
-            Serial.printf("Pairing Loop: %d\nPaired: %d\nif-Statement: %d\n", pairing_loop == NULL, !paired, (!paired) && (pairing_loop == NULL));
             pairing_loop = app.onRepeat(1000, []()
                                         {
-                                        Serial.println("###############################################");
-                                        Serial.println("pairing request");
-                                        Serial.printf("Paired: %d\n", paired);
-                                        if (!paired) {
-                                            Serial.println("###############################################");
-                                            Serial.println("not paired");
                                             static bool led_state = true;
+
                                             digitalWrite(LED_PIN, led_state = !led_state);
+
                                             msg_buf[0] = my_id;
                                             msg_buf[1] = 1;
-                                            msg_buf[2] = MSG_PAIRING_REQUEST;
-                                            send_msg(broadcast_address, msg_buf, 3);
-                                        } });
+                                            msg_buf[2] = BSS_MSG_PAIRING_REQUEST;
+
+                                            send_msg(broadcast_address, msg_buf, 3); });
         }
 
         xSemaphoreGive(xMutex);
