@@ -23,7 +23,8 @@
 	"settings": {
 		"editor.formatOnSave": true,
 		"files.associations": {
-			"cstring": "cpp"
+			"cstring": "cpp",
+			"cstdint": "cpp"
 		}
 	}
 }

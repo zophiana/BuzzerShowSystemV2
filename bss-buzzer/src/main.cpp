@@ -7,27 +7,40 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <ReactESP.h>
+#include <FastLED.h>
 #include "bss_shared.h"
 
 uint8_t broadcast_address[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 esp_now_peer_info_t broadcast_peer;
 
-#define LED_PIN 26
+#define LED_PIN 33
 #define BUZZER_PIN 25
+
+#define LED_NUM 12
+#define BRIGHTNESS 20
+
+CRGB leds[LED_NUM];
 
 uint8_t msg_buf[250];
 #define MSG_CLEAR_BUF memset(msg_buf, 0, 8 * sizeof(uint8_t))
 
+#define sec *1000
+
 uint8_t my_mac[6];
 uint8_t my_id;
 
-uint8_t controller_mac[6];
+RTC_DATA_ATTR bool paired = false;
+bool pairing_mode = false;
+bool pairing_mode_enter;
+RTC_DATA_ATTR uint8_t controller_mac[6];
 esp_now_peer_info_t controller_peer;
 
-bool paired = false;
+ulong last_buzzer_pressed = 0;
 
 reactesp::ReactESP app;
 reactesp::RepeatReaction *pairing_loop;
+reactesp::DelayReaction *pairing_disable_delay;
+reactesp::RepeatReaction *ping_loop;
 
 SemaphoreHandle_t xMutex = NULL;
 
@@ -36,17 +49,8 @@ inline void copy_mac(uint8_t *dest, const uint8_t *source)
     memcpy(dest, source, 6);
 }
 
-void add_peer(esp_now_peer_info *peer_info, uint8_t *peer_mac)
-{
-    copy_mac(peer_info->peer_addr, peer_mac);
-    peer_info->channel = BSS_ESP_NOW_CHANNEL;
-    peer_info->encrypt = BSS_ESP_NOW_ENCRYPT;
-
-    esp_now_add_peer(peer_info);
-}
-
 // callback when data is sent
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
+void OnDataSent(const uint8_t *mac, esp_now_send_status_t status)
 {
     // Serial.print("\r\nLast Packet Send Status:\n");
     //  Serial.printf("time needed to send: %i\n", millis() - send_time);
@@ -114,23 +118,34 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
             case BSS_MSG_PAIRING_ACCEPTED:
                 Serial.println("Pairing Accepted");
 
+                if (pairing_disable_delay != NULL)
+                {
+                    pairing_disable_delay->remove();
+                    pairing_disable_delay = NULL;
+                }
+
                 if (pairing_loop != NULL)
                 {
                     pairing_loop->remove();
                     pairing_loop = NULL;
-
-                    paired = true;
+                    pairing_mode = false;
 
                     digitalWrite(LED_PIN, false);
+                }
+
+                if (!paired)
+                {
+                    paired = true;
 
                     copy_mac(controller_mac, mac);
 
                     copy_mac(controller_peer.peer_addr, controller_mac);
                     esp_now_add_peer(&controller_peer);
+
+                    // app.onDelay(1000, []()
+                    //             {esp_sleep_enable_timer_wakeup(1000);   esp_deep_sleep_start(); });
                 }
-
                 break;
-
             default:
                 break;
             }
@@ -168,10 +183,14 @@ void setup()
 
     WiFi.macAddress(my_mac);
 
+    uint64_t id_buf = 0;
+
     for (uint8_t i = 0; i < 6; i++)
     {
-        my_id += my_mac[i];
+        id_buf += my_mac[i];
     }
+
+    my_id = ((uint8_t *)&id_buf)[0];
 
     xMutex = xSemaphoreCreateMutex();
 
@@ -191,16 +210,34 @@ void setup()
     // get the status of Trasnmitted packet
     esp_now_register_send_cb(OnDataSent);
 
-    // Register peer
-    add_peer(&broadcast_peer, broadcast_address);
+    // Register broadcast peer
+    copy_mac(broadcast_peer.peer_addr, broadcast_address);
+    broadcast_peer.channel = BSS_ESP_NOW_CHANNEL;
+    broadcast_peer.encrypt = BSS_ESP_NOW_ENCRYPT;
+    esp_now_add_peer(&broadcast_peer);
 
     controller_peer.channel = BSS_ESP_NOW_CHANNEL;
     controller_peer.encrypt = BSS_ESP_NOW_ENCRYPT;
 
-    pinMode(LED_PIN, OUTPUT);
+    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, LED_NUM).setCorrection(TypicalLEDStrip);
+    FastLED.setBrightness(BRIGHTNESS);
+
     pinMode(BUZZER_PIN, INPUT_PULLUP);
 
-    digitalWrite(LED_PIN, true);
+    fill_solid(leds, LED_NUM, CRGB::Black);
+    FastLED.show();
+
+    if (paired)
+    {
+        Serial.println("already paired!");
+
+        pairing_loop = NULL;
+
+        digitalWrite(LED_PIN, false);
+
+        copy_mac(controller_peer.peer_addr, controller_mac);
+        esp_now_add_peer(&controller_peer);
+    }
 
     Serial.println("Starting now...");
 }
@@ -211,25 +248,86 @@ void loop()
     {
         app.tick();
 
-        if (paired)
+        static bool buzzer_state = false;
+        static bool buzzer_state_old = false;
+        static bool buzzer_pressed = false;
+        static bool buzzer_released = false;
+        static ulong last_change = 0;
+
+        buzzer_state_old = buzzer_state;
+        buzzer_state = !digitalRead(BUZZER_PIN);
+
+        if (buzzer_state && !buzzer_state_old)
         {
-            static bool buzzer_state = false;
-            static bool buzzer_state_old = buzzer_state;
+            if ((millis() - last_change) >= 10)
+            {
+                Serial.println("buzzer pressed");
 
-            buzzer_state_old = buzzer_state;
-            buzzer_state = !digitalRead(BUZZER_PIN);
+                buzzer_pressed = true;
+                buzzer_released = false;
+            }
 
-            if (buzzer_state && !buzzer_state_old)
+            if (paired)
             {
                 msg_buf[0] = my_id;
                 msg_buf[1] = 1;
                 msg_buf[2] = BSS_MSG_BUZZER_PRESSED;
                 send_msg(controller_mac, msg_buf, 3);
             }
+
+            last_change = millis();
         }
-        else if (!paired && pairing_loop == NULL)
+        else if (!buzzer_state && buzzer_state_old)
         {
-            pairing_loop = app.onRepeat(1000, []()
+            ulong pressed_duration = millis() - last_change;
+
+            if (pressed_duration >= 10)
+            {
+                Serial.println("buzzer released");
+
+                buzzer_pressed = false;
+                buzzer_released = true;
+            }
+
+            last_change = millis();
+
+            if (pressed_duration >= 3 sec && buzzer_released && !pairing_mode)
+            {
+                paired = false;
+                pairing_mode = true;
+                pairing_mode_enter = millis();
+                pairing_loop = NULL;
+
+                // digitalWrite(LED_PIN, true);
+                fill_solid(leds, LED_NUM, CRGB::White);
+                FastLED.show();
+            }
+        }
+
+        if (paired)
+        {
+            /*if (buzzer_state && !buzzer_state_old)
+            {
+                msg_buf[0] = my_id;
+                msg_buf[1] = 1;
+                msg_buf[2] = BSS_MSG_BUZZER_PRESSED;
+                send_msg(controller_mac, msg_buf, 3);
+            }*/
+
+            if (ping_loop == NULL)
+            {
+                ping_loop = app.onRepeat(2 sec, []()
+                                         {
+                                            msg_buf[0] = my_id;
+                                            msg_buf[1] = 1;
+                                            msg_buf[2] = BSS_MSG_PING;
+
+                                            send_msg(controller_mac, msg_buf, 3); });
+            }
+        }
+        else if (!paired && pairing_loop == NULL && pairing_mode)
+        {
+            pairing_loop = app.onRepeat(1 sec, []()
                                         {
                                             static bool led_state = true;
 
@@ -240,7 +338,25 @@ void loop()
                                             msg_buf[2] = BSS_MSG_PAIRING_REQUEST;
 
                                             send_msg(broadcast_address, msg_buf, 3); });
+
+            pairing_disable_delay = app.onDelay(30 sec, []()
+                                                {
+                                                    if (!paired && pairing_loop != NULL && pairing_mode)
+                                                    {
+                                                        pairing_loop->remove();
+                                                        pairing_loop = NULL;
+                                                        pairing_mode = false;
+
+                                                        // digitalWrite(LED_PIN, false);
+                                                        fill_solid(leds, LED_NUM, CRGB::Black);
+                                                        FastLED.show();
+                                                    }
+                                                    
+                                                    pairing_disable_delay = NULL; });
         }
+
+        buzzer_pressed = false;
+        buzzer_released = false;
 
         xSemaphoreGive(xMutex);
     }

@@ -9,6 +9,9 @@
 #include <ReactESP.h>
 #include "bss_shared.h"
 
+#define sec *1000
+#define MAX_ALLOED_TIMEOUT 5 sec
+
 uint8_t broadcast_address[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 esp_now_peer_info_t broadcast_peer;
 
@@ -16,7 +19,7 @@ typedef struct client_struct
 {
     uint8_t id;
     uint8_t mac[6];
-    uint64_t timeout;
+    ulong last_msg;
     esp_now_peer_info_t peer;
     client_struct *next;
 } client_struct;
@@ -31,6 +34,10 @@ typedef struct
 client_struct *clients = NULL;
 
 SemaphoreHandle_t xMutex = NULL;
+
+#define PAIRING_BUTTON D9
+
+bool pairing_mode = false;
 
 uint8_t msg_buf[250];
 #define MSG_CLEAR_BUF memset(msg_buf, 0, 8 * sizeof(uint8_t))
@@ -94,9 +101,9 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
 
         while (current_client != NULL)
         {
-            if (current_client->id == id)
+            if (current_client->id == id && memcmp(mac, current_client->mac, 6) == 0)
             {
-                current_client->timeout = millis();
+                current_client->last_msg = millis();
                 break;
             }
 
@@ -104,10 +111,17 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
         }
 
         PrintMac(mac);
+        Serial.println(id);
+        if (current_client != NULL)
+        {
+            Serial.println(memcmp(mac, current_client->mac, 6));
+            PrintMac(current_client->mac);
+            Serial.println(current_client->id);
+        }
 
         if (data[2] == BSS_MSG_BUZZER_PRESSED)
         {
-            // Serial.println("Buzzer Pressed");
+            Serial.println("Buzzer Pressed");
 
             if (current_client != NULL)
             {
@@ -140,39 +154,44 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
         }
         else if (data[2] == BSS_MSG_PAIRING_REQUEST)
         {
-            Serial.println("Pairing Request");
-
-            msg_buf[0] = id;
-            msg_buf[1] = 1;
-            msg_buf[2] = BSS_MSG_PAIRING_ACCEPTED;
-
-            if (current_client == NULL)
+            if (pairing_mode)
             {
-                client_struct *new_client = (client_struct *)malloc(sizeof(client_struct));
-                new_client->id = id;
-                copy_mac(new_client->mac, mac);
-                new_client->timeout = millis();
-                new_client->next = NULL;
+                Serial.println("Pairing Request");
 
-                memset(&new_client->peer, 0, sizeof(esp_now_peer_info_t));
+                msg_buf[0] = id;
+                msg_buf[1] = 1;
+                msg_buf[2] = BSS_MSG_PAIRING_ACCEPTED;
 
-                PrintMac(new_client->mac);
+                if (current_client == NULL)
+                {
+                    client_struct *new_client = (client_struct *)malloc(sizeof(client_struct));
+                    new_client->id = id;
+                    copy_mac(new_client->mac, mac);
+                    new_client->last_msg = millis();
+                    new_client->next = NULL;
 
-                copy_mac(new_client->peer.peer_addr, mac);
-                new_client->peer.channel = BSS_ESP_NOW_CHANNEL;
-                new_client->peer.encrypt = BSS_ESP_NOW_ENCRYPT;
+                    memset(&new_client->peer, 0, sizeof(esp_now_peer_info_t));
 
-                add_client(new_client);
+                    PrintMac(new_client->mac);
 
-                current_client = new_client;
+                    copy_mac(new_client->peer.peer_addr, mac);
+                    new_client->peer.channel = BSS_ESP_NOW_CHANNEL;
+                    new_client->peer.encrypt = BSS_ESP_NOW_ENCRYPT;
+
+                    add_client(new_client);
+
+                    current_client = new_client;
+                }
+
+                Serial.println("Add peer: ");
+                if (!esp_now_is_peer_exist(mac))
+                    esp_now_add_peer(&current_client->peer);
+
+                Serial.println("add client");
+                send_msg(current_client->mac, msg_buf, 3);
+
+                // app.onDelay(1000, [](){esp_sleep_enable_timer_wakeup(1000);   esp_deep_sleep_start(); });
             }
-
-            Serial.println("Add peer: ");
-            if (!esp_now_is_peer_exist(mac))
-                esp_now_add_peer(&current_client->peer);
-
-            Serial.println("add client");
-            send_msg(current_client->mac, msg_buf, 3);
         }
 
         xSemaphoreGive(xMutex);
@@ -223,6 +242,31 @@ void setup()
     }
     Serial.println();
 
+    pinMode(D10, OUTPUT);
+    pinMode(PAIRING_BUTTON, INPUT_PULLUP);
+
+    app.onInterrupt(PAIRING_BUTTON, RISING, []()
+                    { 
+                        static ulong last_pressed = 0;
+
+                        if ((millis() - last_pressed) >= 250) {
+                            static reactesp::RepeatReaction *react_blink = NULL;
+                            pairing_mode = !pairing_mode;
+
+                            last_pressed = millis();
+
+                            if (pairing_mode && react_blink == NULL) {
+                                digitalWrite(D10, true);
+                                react_blink = app.onRepeat(1000, [](){blink(D10, false); });
+                            }
+                            else if (!pairing_mode && react_blink != NULL) {
+                                digitalWrite(D10, false);
+                                
+                                react_blink->remove();
+                                react_blink = NULL;
+                            }
+                        } });
+
     xMutex = xSemaphoreCreateMutex();
 
     // Once ESPNow is successfully Init, we will register for recv CB to
@@ -235,8 +279,8 @@ void setup()
 
     // Register peer
     memcpy(broadcast_peer.peer_addr, broadcast_address, 6);
-    broadcast_peer.channel = 0;
-    broadcast_peer.encrypt = false;
+    broadcast_peer.channel = BSS_ESP_NOW_CHANNEL;
+    broadcast_peer.encrypt = BSS_ESP_NOW_ENCRYPT;
 
     esp_now_add_peer(&broadcast_peer);
 
@@ -248,6 +292,20 @@ void loop()
     if (xSemaphoreTake(xMutex, 10))
     {
         app.tick();
+
+        client_struct *current_client = clients;
+
+        while (current_client != NULL)
+        {
+            /*if ((millis() - current_client->last_msg) >= MAX_ALLOED_TIMEOUT)
+            {
+                Serial.println("lost the connection to:");
+                PrintMac(current_client->mac);
+            }*/
+
+            current_client = current_client->next;
+        }
+
         xSemaphoreGive(xMutex);
     }
 }
