@@ -12,7 +12,7 @@
 #define sec *1000
 #define MAX_ALLOED_TIMEOUT 5 sec
 
-uint8_t broadcast_address[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 esp_now_peer_info_t broadcast_peer;
 
 typedef struct client_struct
@@ -40,11 +40,24 @@ SemaphoreHandle_t xMutex = NULL;
 bool pairing_mode = false;
 
 uint8_t msg_buf[250];
-#define MSG_CLEAR_BUF memset(msg_buf, 0, 8 * sizeof(uint8_t))
 
 reactesp::ReactESP app;
 
-void send_msg(const uint8_t *mac_addr, const uint8_t *data, const uint8_t size);
+void send_msg(const uint8_t *mac_addr, const uint8_t *data, const uint8_t size)
+{
+    esp_err_t result = esp_now_send(mac_addr, data, size);
+
+    Serial.println(millis());
+
+    if (result == ESP_OK)
+    {
+        Serial.println("Sent with success\n");
+    }
+    else
+    {
+        Serial.println("Error sending the data\n");
+    }
+}
 
 void add_client(client_struct *client)
 {
@@ -76,7 +89,7 @@ void add_peer(esp_now_peer_info_t *peer_info, uint8_t *peer_mac)
     esp_now_add_peer(peer_info);
 }
 
-void PrintMac(const uint8_t *mac)
+void print_mac(const uint8_t *mac)
 {
     Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], mac[6]);
 }
@@ -91,8 +104,7 @@ void fill_msg_buf(uint8_t *buf, uint8_t id, rgb_t rgb)
     buf[5] = rgb.b;
 }
 
-// callback function that will be executed when data is received
-void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
+void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
 {
     if (xSemaphoreTake(xMutex, portMAX_DELAY))
     {
@@ -110,12 +122,13 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
             current_client = current_client->next;
         }
 
-        PrintMac(mac);
+        print_mac(mac);
         Serial.println(id);
+
         if (current_client != NULL)
         {
             Serial.println(memcmp(mac, current_client->mac, 6));
-            PrintMac(current_client->mac);
+            print_mac(current_client->mac);
             Serial.println(current_client->id);
         }
 
@@ -131,11 +144,11 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
                 for (; tmp_client != NULL; i += 6)
                 {
                     // Serial.print("add msg with id: ");
-                    fill_msg_buf(&msg_buf[i], tmp_client->id, {1, 1, 1});
+                    fill_msg_buf(&msg_buf[i], tmp_client->id, {0, 255, 0});
                     tmp_client = tmp_client->next;
                 }
 
-                send_msg(broadcast_address, msg_buf, i);
+                send_msg(broadcast_mac, msg_buf, i);
 
                 app.onDelay(1000, []()
                             {
@@ -149,7 +162,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
                                 tmp_client = tmp_client->next;
                             }
 
-                            send_msg(broadcast_address, msg_buf, i); });
+                            send_msg(broadcast_mac, msg_buf, i); });
             }
         }
         else if (data[2] == BSS_MSG_PAIRING_REQUEST)
@@ -172,7 +185,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
 
                     memset(&new_client->peer, 0, sizeof(esp_now_peer_info_t));
 
-                    PrintMac(new_client->mac);
+                    print_mac(new_client->mac);
 
                     copy_mac(new_client->peer.peer_addr, mac);
                     new_client->peer.channel = BSS_ESP_NOW_CHANNEL;
@@ -189,8 +202,25 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
 
                 Serial.println("add client");
                 send_msg(current_client->mac, msg_buf, 3);
+            }
+        }
+        else if (data[2] == BSS_MSG_WAKEUP_REQUEST)
+        {
+            if (pairing_mode && current_client != NULL)
+            {
+                msg_buf[0] = id;
+                msg_buf[1] = 1;
+                msg_buf[2] = BSS_MSG_WAKEUP_ACCEPTED;
 
-                // app.onDelay(1000, [](){esp_sleep_enable_timer_wakeup(1000);   esp_deep_sleep_start(); });
+                send_msg(current_client->mac, msg_buf, 3);
+            }
+            else if (current_client == NULL)
+            {
+                msg_buf[0] = id;
+                msg_buf[1] = 1;
+                msg_buf[2] = BSS_MSG_PAIRING_REMOVE;
+
+                send_msg(current_client->mac, msg_buf, 3);
             }
         }
 
@@ -198,8 +228,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
     }
 }
 
-// callback when data is sent
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
+void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
     // Serial.print("\r\nLast Packet Send Status:\n");
     //  Serial.printf("time needed to send: %i\n", millis() - send_time);
@@ -208,33 +237,14 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
     // Serial.printf("msg delivered: %i\n", millis() - send_time);
 }
 
-void send_msg(const uint8_t *mac_addr, const uint8_t *data, const uint8_t size)
-{
-    esp_err_t result = esp_now_send(mac_addr, data, size);
-
-    Serial.println(millis());
-
-    if (result == ESP_OK)
-    {
-        Serial.println("Sent with success\n");
-    }
-    else
-    {
-        Serial.println("Error sending the data\n");
-    }
-}
-
 void setup()
 {
-    // Initialize Serial Monitor
     Serial.begin(115200);
 
-    // Set device as a Wi-Fi Station
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
 
-    // Init ESP-NOW
     if (esp_now_init() != ESP_OK)
     {
         Serial.println("Error initializing ESP-NOW");
@@ -269,19 +279,12 @@ void setup()
 
     xMutex = xSemaphoreCreateMutex();
 
-    // Once ESPNow is successfully Init, we will register for recv CB to
-    // get recv packer info
-    esp_now_register_recv_cb(OnDataRecv);
+    esp_now_register_recv_cb(on_data_recv);
+    esp_now_register_send_cb(on_data_sent);
 
-    // Once ESPNow is successfully Init, we will register for Send CB to
-    // get the status of Trasnmitted packet
-    esp_now_register_send_cb(OnDataSent);
-
-    // Register peer
-    memcpy(broadcast_peer.peer_addr, broadcast_address, 6);
+    memcpy(broadcast_peer.peer_addr, broadcast_mac, 6);
     broadcast_peer.channel = BSS_ESP_NOW_CHANNEL;
     broadcast_peer.encrypt = BSS_ESP_NOW_ENCRYPT;
-
     esp_now_add_peer(&broadcast_peer);
 
     Serial.println("Starting now...");
@@ -300,7 +303,7 @@ void loop()
             /*if ((millis() - current_client->last_msg) >= MAX_ALLOED_TIMEOUT)
             {
                 Serial.println("lost the connection to:");
-                PrintMac(current_client->mac);
+                print_mac(current_client->mac);
             }*/
 
             current_client = current_client->next;
