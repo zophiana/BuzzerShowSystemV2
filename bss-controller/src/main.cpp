@@ -35,7 +35,11 @@ client_struct *clients = NULL;
 
 SemaphoreHandle_t xMutex = NULL;
 
+bool buzzer_pressed = false;
+
 #define PAIRING_BUTTON D9
+#define RESET_BUTTON D8
+#define WRONG_BUTTON D7
 
 bool pairing_mode = false;
 
@@ -138,33 +142,21 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
         {
             Serial.println("Buzzer Pressed");
 
-            if (current_client != NULL)
+            if (current_client != NULL && !buzzer_pressed)
             {
+                buzzer_pressed = true;
+
                 uint8_t i = 0;
                 client_struct *tmp_client = clients;
 
                 for (; tmp_client != NULL; i += 6)
                 {
                     // Serial.print("add msg with id: ");
-                    fill_msg_buf(&msg_buf[i], tmp_client->id, {0, 255, 0});
+                    fill_msg_buf(&msg_buf[i], tmp_client->id, {255, 255, 255});
                     tmp_client = tmp_client->next;
                 }
 
                 send_msg(broadcast_mac, msg_buf, i);
-
-                app.onDelay(1000, []()
-                            {
-                            uint8_t i = 0;
-                            client_struct *tmp_client = clients;
-
-                            for (; tmp_client != NULL; i += 6)
-                            {
-                                // Serial.print("add msg with id: ");
-                                fill_msg_buf(&msg_buf[i], tmp_client->id, {0, 0, 0});
-                                tmp_client = tmp_client->next;
-                            }
-
-                            send_msg(broadcast_mac, msg_buf, i); });
             }
         }
         else if (data[2] == BSS_MSG_PAIRING_REQUEST)
@@ -256,26 +248,87 @@ void setup()
 
     pinMode(D10, OUTPUT);
     pinMode(PAIRING_BUTTON, INPUT_PULLUP);
+    pinMode(RESET_BUTTON, INPUT_PULLUP);
+    pinMode(WRONG_BUTTON, INPUT_PULLUP);
 
     app.onInterrupt(PAIRING_BUTTON, RISING, []()
                     { 
                         static ulong last_pressed = 0;
 
                         if ((millis() - last_pressed) >= 250) {
-                            static reactesp::RepeatReaction *react_blink = NULL;
-                            pairing_mode = !pairing_mode;
-
                             last_pressed = millis();
 
-                            if (pairing_mode && react_blink == NULL) {
-                                digitalWrite(D10, true);
-                                react_blink = app.onRepeat(1000, [](){blink(D10, false); });
+                            if (!buzzer_pressed) {
+                                static reactesp::RepeatReaction *react_blink = NULL;
+                                pairing_mode = !pairing_mode;
+
+                                if (pairing_mode && react_blink == NULL) {
+                                    digitalWrite(D10, true);
+                                    react_blink = app.onRepeat(1000, [](){blink(D10, false); });
+                                }
+                                else if (!pairing_mode && react_blink != NULL) {
+                                    digitalWrite(D10, false);
+                                    
+                                    react_blink->remove();
+                                    react_blink = NULL;
+                                }
+                            } else {
+                                uint8_t i = 0;
+                                client_struct *client = clients;
+
+                                for (; client != NULL; i += 6)
+                                {
+                                    fill_msg_buf(&msg_buf[i], client->id, {0, 255, 0});
+                                    client = client->next;
+                                }
+
+                                send_msg(broadcast_mac, msg_buf, i);
                             }
-                            else if (!pairing_mode && react_blink != NULL) {
-                                digitalWrite(D10, false);
-                                
-                                react_blink->remove();
-                                react_blink = NULL;
+                        } });
+
+    app.onInterrupt(RESET_BUTTON, RISING, []()
+                    {
+                        static ulong last_pressed = 0;
+
+                        if ((millis() - last_pressed) >= 250) {
+                            last_pressed = millis();
+
+                            if (buzzer_pressed)
+                            {
+                                buzzer_pressed = false;
+
+                                uint8_t i = 0;
+                                client_struct *client = clients;
+
+                                for (; client != NULL; i += 6)
+                                {
+                                    fill_msg_buf(&msg_buf[i], client->id, {0, 0, 0});
+                                    client = client->next;
+                                }
+
+                                send_msg(broadcast_mac, msg_buf, i);
+                            }
+                        } });
+
+    app.onInterrupt(WRONG_BUTTON, RISING, []()
+                    {
+                        static ulong last_pressed = 0;
+
+                        if ((millis() - last_pressed) >= 250) {
+                            last_pressed = millis();
+
+                            if (buzzer_pressed)
+                            {
+                                uint8_t i = 0;
+                                client_struct *client = clients;
+
+                                for (; client != NULL; i += 6)
+                                {
+                                    fill_msg_buf(&msg_buf[i], client->id, {255, 0, 0});
+                                    client = client->next;
+                                }
+
+                                send_msg(broadcast_mac, msg_buf, i);
                             }
                         } });
 
