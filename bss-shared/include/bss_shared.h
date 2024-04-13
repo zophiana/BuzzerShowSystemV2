@@ -6,8 +6,7 @@
 #define BSS_SHARED_H
 
 #include <stdint.h>
-
-void digitalWrite(uint8_t pin, uint8_t val);
+#include <string.h>
 
 // Message Types
 #define BSS_MSG_PAIRING_REQUEST 0x00
@@ -24,11 +23,13 @@ void digitalWrite(uint8_t pin, uint8_t val);
 #define BSS_ESP_NOW_CHANNEL 0
 #define BSS_ESP_NOW_ENCRYPT false
 
-inline void blink(uint8_t pin, bool initial_state)
-{
-  static bool state = !initial_state;
+// MAC Utils
 
-  digitalWrite(pin, state = !state);
+#define MAC_SIZE sizeof(uint8_t) * 6
+
+inline void mac_copy(uint8_t *dest, const uint8_t *source)
+{
+  memcpy(dest, source, MAC_SIZE);
 }
 
 #endif

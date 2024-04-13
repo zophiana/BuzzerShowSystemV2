@@ -12,7 +12,7 @@
 #include <FastLED.h>
 #include "bss_shared.h"
 
-uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t broadcast_mac[MAC_SIZE] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 esp_now_peer_info_t broadcast_peer;
 
 #define LED_PIN 33
@@ -28,17 +28,13 @@ esp_now_peer_info_t broadcast_peer;
 CRGB leds[LED_NUM];
 
 uint8_t msg_buf[250];
-#define MSG_CLEAR_BUF memset(msg_buf, 0, 8 * sizeof(uint8_t))
 
 #define sec *1000
 
-uint8_t my_mac[6];
+uint8_t my_mac[MAC_SIZE];
 uint8_t my_id;
 
-RTC_DATA_ATTR bool paired = false;
-bool pairing_mode = false;
-bool pairing_mode_enter;
-RTC_DATA_ATTR uint8_t controller_mac[6];
+uint8_t controller_mac[MAC_SIZE];
 esp_now_peer_info_t controller_peer;
 
 ulong last_buzzer_pressed = 0;
@@ -48,17 +44,20 @@ reactesp::RepeatReaction *pairing_loop = NULL;
 reactesp::DelayReaction *pairing_disable_delay;
 reactesp::RepeatReaction *ping_loop;
 
+enum bss_client_pairing_state
+{
+    UNPAIRED,
+    PAIRING_MODE,
+    PAIRED
+};
+enum bss_client_pairing_state pairing_state = UNPAIRED;
+
 bool wakeup = false;
 esp_sleep_wakeup_cause_t wakeup_cause;
 
 nvs_handle_t nvs_bss_handle;
 
 SemaphoreHandle_t xMutex = NULL;
-
-inline void copy_mac(uint8_t *dest, const uint8_t *source)
-{
-    memcpy(dest, source, 6);
-}
 
 void on_data_sent(const uint8_t *mac, esp_now_send_status_t status)
 {
@@ -69,17 +68,6 @@ void on_data_sent(const uint8_t *mac, esp_now_send_status_t status)
     // Serial.printf("msg delivered: %i\n", millis() - send_time);
 }
 
-bool controller_mac_is_empty()
-{
-    for (size_t i = 0; i < 6; i++)
-    {
-        if (controller_mac[i] != 0)
-            return false;
-    }
-
-    return true;
-}
-
 void go_to_sleep()
 {
     fill_solid(leds, LED_NUM, CRGB::Black);
@@ -88,10 +76,61 @@ void go_to_sleep()
 
     Serial.flush();
 
-    if (paired)
+    if (pairing_state == PAIRED)
         esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
 
     esp_deep_sleep_start();
+}
+
+void send_msg(const uint8_t *mac_addr, const uint8_t *data, const uint8_t size)
+{
+    esp_err_t result = esp_now_send(mac_addr, data, size);
+
+    Serial.println(millis());
+
+    if (result == ESP_OK)
+    {
+        Serial.println("Sent with success\n");
+    }
+    else
+    {
+        Serial.println("Error sending the data\n");
+    }
+}
+
+void set_ping_loop()
+{
+    if (ping_loop == NULL)
+    {
+        ping_loop = app.onRepeat(2 sec, []()
+                                 {
+                                    msg_buf[0] = my_id;
+                                    msg_buf[1] = 1;
+                                    msg_buf[2] = BSS_MSG_PING;
+
+                                    send_msg(controller_mac, msg_buf, 3); });
+    }
+}
+
+void remove_pairing_disable_delay()
+{
+    if (pairing_disable_delay != NULL)
+    {
+        pairing_disable_delay->remove();
+        pairing_disable_delay = NULL;
+    }
+}
+
+void remove_pairing_loop()
+{
+    if (pairing_loop != NULL)
+    {
+        pairing_loop->remove();
+        pairing_loop = NULL;
+
+        fill_solid(leds, LED_NUM, CRGB::Black);
+        FastLED.show();
+    }
 }
 
 void print_mac(const uint8_t *mac)
@@ -141,68 +180,64 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
                 break;
 
             case BSS_MSG_SET_NEOPIXEL_COLOR:
-                CRGB test;
-                test.setRGB(start_ptr[3], start_ptr[4], start_ptr[5]);
-                fill_solid(leds, LED_NUM, test);
+                CRGB neopixel_color;
+                neopixel_color.setRGB(start_ptr[3], start_ptr[4], start_ptr[5]);
+
+                fill_solid(leds, LED_NUM, neopixel_color);
                 FastLED.show();
                 break;
 
             case BSS_MSG_PAIRING_ACCEPTED:
                 Serial.println("Pairing Accepted");
 
-                if (pairing_disable_delay != NULL)
+                remove_pairing_disable_delay();
+                remove_pairing_loop();
+
+                if (pairing_state != PAIRED)
                 {
-                    pairing_disable_delay->remove();
-                    pairing_disable_delay = NULL;
-                }
+                    pairing_state = PAIRED;
 
-                if (pairing_loop != NULL)
-                {
-                    pairing_loop->remove();
-                    pairing_loop = NULL;
-                    pairing_mode = false;
+                    mac_copy(controller_mac, mac);
 
-                    fill_solid(leds, LED_NUM, CRGB::Black);
-                    FastLED.show();
-                }
-
-                if (!paired)
-                {
-                    paired = true;
-
-                    copy_mac(controller_mac, mac);
-
-                    copy_mac(controller_peer.peer_addr, controller_mac);
+                    mac_copy(controller_peer.peer_addr, controller_mac);
                     esp_now_add_peer(&controller_peer);
 
                     err = nvs_open("bss_client", NVS_READWRITE, &nvs_bss_handle);
                     if (err == ESP_OK)
                     {
-                        nvs_set_u8(nvs_bss_handle, "paired", paired);
-                        nvs_set_blob(nvs_bss_handle, "controller_mac", controller_mac, 6 * sizeof(uint8_t));
+                        nvs_set_u8(nvs_bss_handle, "paired", true);
+                        nvs_set_blob(nvs_bss_handle, "controller_mac", controller_mac, MAC_SIZE);
 
                         nvs_commit(nvs_bss_handle);
                         nvs_close(nvs_bss_handle);
                     }
+
+                    set_ping_loop();
 
                     esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
                 }
                 break;
 
             case BSS_MSG_PAIRING_REMOVE:
-                paired = false;
+                Serial.println("Please remove Pairing");
 
-                err = nvs_open("bss_client", NVS_READWRITE, &nvs_bss_handle);
-                if (err == ESP_OK)
+                remove_pairing_disable_delay();
+                remove_pairing_loop();
+
+                if (pairing_state != UNPAIRED)
                 {
-                    nvs_set_u8(nvs_bss_handle, "paired", paired);
+                    pairing_state = UNPAIRED;
 
-                    nvs_commit(nvs_bss_handle);
-                    nvs_close(nvs_bss_handle);
+                    err = nvs_open("bss_client", NVS_READWRITE, &nvs_bss_handle);
+                    if (err == ESP_OK)
+                    {
+                        nvs_set_u8(nvs_bss_handle, "paired", false);
+
+                        nvs_commit(nvs_bss_handle);
+                        nvs_close(nvs_bss_handle);
+                    }
                 }
 
-                ping_loop->remove();
-                ping_loop = NULL;
                 break;
 
             default:
@@ -211,22 +246,6 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
         }
 
         xSemaphoreGive(xMutex);
-    }
-}
-
-void send_msg(const uint8_t *mac_addr, const uint8_t *data, const uint8_t size)
-{
-    esp_err_t result = esp_now_send(mac_addr, data, size);
-
-    Serial.println(millis());
-
-    if (result == ESP_OK)
-    {
-        Serial.println("Sent with success\n");
-    }
-    else
-    {
-        Serial.println("Error sending the data\n");
     }
 }
 
@@ -241,22 +260,22 @@ void setup()
     esp_err_t err = nvs_open("bss_client", NVS_READONLY, &nvs_bss_handle);
     if (err == ESP_OK)
     {
-        uint8_t paired_tmp = 0;
-        nvs_get_u8(nvs_bss_handle, "paired", &paired_tmp);
-        paired = paired_tmp == 1 ? true : false;
+        uint8_t paired = 0;
+        nvs_get_u8(nvs_bss_handle, "paired", &paired);
+        pairing_state = paired == 1 ? PAIRED : UNPAIRED;
 
-        size_t mac_size = 6 * sizeof(uint8_t);
+        size_t mac_size = MAC_SIZE;
 
         if (paired)
             nvs_get_blob(nvs_bss_handle, "controller_mac", controller_mac, &mac_size);
 
-        // nvs_set_i32(nvs_bss_handle, "paired", paired_tmp);
-        // nvs_commit(nvs_bss_handle);
         nvs_close(nvs_bss_handle);
     }
 
-    if (!paired && wakeup_cause == ESP_SLEEP_WAKEUP_TIMER)
+    if (pairing_state == UNPAIRED && wakeup_cause == ESP_SLEEP_WAKEUP_TIMER)
         esp_deep_sleep_start();
+    else if (pairing_state == PAIRED)
+        set_ping_loop();
 
     Serial.begin(115200);
 
@@ -268,7 +287,7 @@ void setup()
 
     uint64_t id_buf = 0;
 
-    for (uint8_t i = 0; i < 6; i++)
+    for (uint8_t i = 0; i < MAC_SIZE; i++)
     {
         id_buf += my_mac[i];
     }
@@ -285,7 +304,7 @@ void setup()
     esp_now_register_recv_cb(on_data_recv);
     esp_now_register_send_cb(on_data_sent);
 
-    copy_mac(broadcast_peer.peer_addr, broadcast_mac);
+    mac_copy(broadcast_peer.peer_addr, broadcast_mac);
     broadcast_peer.channel = BSS_ESP_NOW_CHANNEL;
     broadcast_peer.encrypt = BSS_ESP_NOW_ENCRYPT;
     esp_now_add_peer(&broadcast_peer);
@@ -293,9 +312,9 @@ void setup()
     controller_peer.channel = BSS_ESP_NOW_CHANNEL;
     controller_peer.encrypt = BSS_ESP_NOW_ENCRYPT;
 
-    if (paired)
+    if (pairing_state == PAIRED)
     {
-        copy_mac(controller_peer.peer_addr, controller_mac);
+        mac_copy(controller_peer.peer_addr, controller_mac);
         esp_now_add_peer(&controller_peer);
 
         esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
@@ -361,7 +380,7 @@ void loop()
                 buzzer_released = false;
             }
 
-            if (paired)
+            if (pairing_state == PAIRED)
             {
                 msg_buf[0] = my_id;
                 msg_buf[1] = 1;
@@ -385,71 +404,57 @@ void loop()
 
             last_change = millis();
 
-            if (pressed_duration >= 3 sec && buzzer_released && !pairing_mode)
+            if (pressed_duration >= 3 sec && buzzer_released && pairing_state != PAIRING_MODE)
             {
-                paired = false;
+                pairing_state = PAIRING_MODE;
 
                 esp_err_t err = nvs_open("bss_client", NVS_READWRITE, &nvs_bss_handle);
                 if (err == ESP_OK)
                 {
-                    nvs_set_u8(nvs_bss_handle, "paired", paired);
+                    nvs_set_u8(nvs_bss_handle, "paired", false);
 
                     nvs_commit(nvs_bss_handle);
                     nvs_close(nvs_bss_handle);
                 }
 
-                pairing_mode = true;
-                pairing_mode_enter = millis();
-                pairing_loop = NULL;
+                if (pairing_disable_delay == NULL)
+                {
+                    pairing_disable_delay = app.onDelay(10 sec, []()
+                                                        {
+                                                            if (pairing_state != PAIRED)
+                                                                go_to_sleep();
+
+                                                            pairing_disable_delay = NULL; });
+                }
+
+                if (pairing_loop == NULL)
+                {
+                    pairing_loop = app.onRepeat(1 sec, []()
+                                                {
+                                                    static bool led_state = true;
+
+                                                    led_state = !led_state;
+
+                                                    if (led_state)
+                                                    {
+                                                        fill_solid(leds, LED_NUM, CRGB::White);
+                                                    }
+                                                    else
+                                                    {
+                                                        fill_solid(leds, LED_NUM, CRGB::Black);
+                                                    }
+                                                    FastLED.show();
+
+                                                    msg_buf[0] = my_id;
+                                                    msg_buf[1] = 1;
+                                                    msg_buf[2] = BSS_MSG_PAIRING_REQUEST;
+
+                                                    send_msg(broadcast_mac, msg_buf, 3); });
+                }
 
                 fill_solid(leds, LED_NUM, CRGB::White);
                 FastLED.show();
             }
-        }
-
-        if (paired)
-        {
-            if (ping_loop == NULL)
-            {
-                ping_loop = app.onRepeat(2 sec, []()
-                                         {
-                                    msg_buf[0] = my_id;
-                                    msg_buf[1] = 1;
-                                    msg_buf[2] = BSS_MSG_PING;
-
-                                    send_msg(controller_mac, msg_buf, 3); });
-            }
-        }
-        else if (!paired && pairing_loop == NULL && pairing_mode)
-        {
-            pairing_disable_delay = app.onDelay(10 sec, []()
-                                                {
-                                            if (!paired && pairing_loop != NULL && pairing_mode)
-                                                go_to_sleep();
-
-                                            pairing_disable_delay = NULL; });
-
-            pairing_loop = app.onRepeat(1 sec, []()
-                                        {
-                                    static bool led_state = true;
-
-                                    led_state = !led_state;
-
-                                    if (led_state)
-                                    {
-                                        fill_solid(leds, LED_NUM, CRGB::White);
-                                    }
-                                    else
-                                    {
-                                        fill_solid(leds, LED_NUM, CRGB::Black);
-                                    }
-                                    FastLED.show();
-
-                                    msg_buf[0] = my_id;
-                                    msg_buf[1] = 1;
-                                    msg_buf[2] = BSS_MSG_PAIRING_REQUEST;
-
-                                    send_msg(broadcast_mac, msg_buf, 3); });
         }
 
         buzzer_pressed = false;

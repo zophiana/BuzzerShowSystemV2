@@ -43,6 +43,13 @@ uint8_t msg_buf[250];
 
 reactesp::ReactESP app;
 
+inline void blink(uint8_t pin, bool initial_state)
+{
+    static bool state = !initial_state;
+
+    digitalWrite(pin, state = !state);
+}
+
 void send_msg(const uint8_t *mac_addr, const uint8_t *data, const uint8_t size)
 {
     esp_err_t result = esp_now_send(mac_addr, data, size);
@@ -75,14 +82,9 @@ void add_client(client_struct *client)
     head->next = client;
 }
 
-inline void copy_mac(uint8_t *dest, const uint8_t *source)
-{
-    memcpy(dest, source, 6);
-}
-
 void add_peer(esp_now_peer_info_t *peer_info, uint8_t *peer_mac)
 {
-    copy_mac(peer_info->peer_addr, peer_mac);
+    mac_copy(peer_info->peer_addr, peer_mac);
     peer_info->channel = BSS_ESP_NOW_CHANNEL;
     peer_info->encrypt = BSS_ESP_NOW_ENCRYPT;
 
@@ -179,7 +181,7 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
                 {
                     client_struct *new_client = (client_struct *)malloc(sizeof(client_struct));
                     new_client->id = id;
-                    copy_mac(new_client->mac, mac);
+                    mac_copy(new_client->mac, mac);
                     new_client->last_msg = millis();
                     new_client->next = NULL;
 
@@ -187,7 +189,7 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
 
                     print_mac(new_client->mac);
 
-                    copy_mac(new_client->peer.peer_addr, mac);
+                    mac_copy(new_client->peer.peer_addr, mac);
                     new_client->peer.channel = BSS_ESP_NOW_CHANNEL;
                     new_client->peer.encrypt = BSS_ESP_NOW_ENCRYPT;
 
@@ -282,7 +284,7 @@ void setup()
     esp_now_register_recv_cb(on_data_recv);
     esp_now_register_send_cb(on_data_sent);
 
-    memcpy(broadcast_peer.peer_addr, broadcast_mac, 6);
+    mac_copy(broadcast_peer.peer_addr, broadcast_mac);
     broadcast_peer.channel = BSS_ESP_NOW_CHANNEL;
     broadcast_peer.encrypt = BSS_ESP_NOW_ENCRYPT;
     esp_now_add_peer(&broadcast_peer);
