@@ -48,9 +48,17 @@ enum bss_client_pairing_state
 {
     UNPAIRED,
     PAIRING_MODE,
-    PAIRED
+    PAIRED,
 };
 enum bss_client_pairing_state pairing_state = UNPAIRED;
+
+enum bss_client_buzzer_state
+{
+    UNPRESSED,
+    PRESSED,
+    HOLD,
+    RELEASED,
+};
 
 bool wakeup = false;
 esp_sleep_wakeup_cause_t wakeup_cause;
@@ -212,6 +220,9 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
                         nvs_close(nvs_bss_handle);
                     }
 
+                    fill_solid(leds, LED_NUM, CRGB::Green);
+                    FastLED.show();
+
                     set_ping_loop();
 
                     esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
@@ -338,7 +349,7 @@ void setup()
     }
 
     FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, LED_NUM).setCorrection(TypicalLEDStrip);
-    FastLED.setBrightness(255);
+    FastLED.setBrightness(BRIGHTNESS);
 
     pinMode(BUZZER_PIN, INPUT);
     pinMode(ACTIVATION_5V_PIN, OUTPUT);
@@ -353,31 +364,29 @@ void setup()
     xMutex = xSemaphoreCreateMutex();
 
     Serial.println("Starting now...");
+    Serial.println(wakeup_cause);
 }
 
 void loop()
 {
     if (xSemaphoreTake(xMutex, 10))
     {
-        app.tick();
+        static bool buzzer_pin_state = false;
+        static bool buzzer_pin_state_old = false;
+        static bss_client_buzzer_state buzzer_state = UNPRESSED;
+        static ulong last_pressed = 0;
+        static ulong last_released = 0;
 
-        static bool buzzer_state = false;
-        static bool buzzer_state_old = false;
-        static bool buzzer_pressed = false;
-        static bool buzzer_released = false;
-        static ulong last_change = 0;
+        buzzer_pin_state_old = buzzer_pin_state;
+        buzzer_pin_state = !digitalRead(BUZZER_PIN);
 
-        buzzer_state_old = buzzer_state;
-        buzzer_state = !digitalRead(BUZZER_PIN);
-
-        if (buzzer_state && !buzzer_state_old)
+        if (buzzer_pin_state && !buzzer_pin_state_old)
         {
-            if ((millis() - last_change) >= 10)
+            if ((millis() - last_pressed) >= 10)
             {
                 Serial.println("buzzer pressed");
 
-                buzzer_pressed = true;
-                buzzer_released = false;
+                buzzer_state = PRESSED;
             }
 
             if (pairing_state == PAIRED)
@@ -388,23 +397,33 @@ void loop()
                 send_msg(controller_mac, msg_buf, 3);
             }
 
-            last_change = millis();
+            last_pressed = millis();
         }
-        else if (!buzzer_state && buzzer_state_old)
+        else if (!buzzer_pin_state && buzzer_pin_state_old)
         {
-            ulong pressed_duration = millis() - last_change;
 
-            if (pressed_duration >= 10)
+            if ((millis() - last_released) >= 10)
             {
                 Serial.println("buzzer released");
 
-                buzzer_pressed = false;
-                buzzer_released = true;
+                buzzer_state = RELEASED;
             }
 
-            last_change = millis();
+            last_released = millis();
+        }
+        else if (buzzer_pin_state && buzzer_pin_state_old)
+            buzzer_state = HOLD;
+        else //(!buzzer_pin_state && !buzzer_pin_state_old)
+            buzzer_state = UNPRESSED;
 
-            if (pressed_duration >= 3 sec && buzzer_released && pairing_state != PAIRING_MODE)
+        if (pairing_state != PAIRING_MODE)
+        {
+            if (buzzer_state == PRESSED)
+            {
+                fill_solid(leds, LED_NUM, CRGB::Yellow);
+                FastLED.show();
+            }
+            else if (buzzer_state == HOLD && (millis() - last_pressed) >= 3 sec)
             {
                 pairing_state = PAIRING_MODE;
 
@@ -455,10 +474,11 @@ void loop()
                 fill_solid(leds, LED_NUM, CRGB::White);
                 FastLED.show();
             }
+            else if (buzzer_state == UNPRESSED && (millis() - last_pressed) > 1 sec)
+                go_to_sleep();
         }
 
-        buzzer_pressed = false;
-        buzzer_released = false;
+        app.tick();
 
         xSemaphoreGive(xMutex);
     }
