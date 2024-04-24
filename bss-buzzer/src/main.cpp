@@ -38,6 +38,7 @@ uint8_t controller_mac[MAC_SIZE];
 esp_now_peer_info_t controller_peer;
 
 ulong last_buzzer_pressed = 0;
+ulong last_sucessful_msg_to_master = 0;
 
 reactesp::ReactESP app;
 reactesp::RepeatReaction *pairing_loop = NULL;
@@ -51,6 +52,14 @@ enum bss_client_pairing_state
     PAIRED,
 };
 enum bss_client_pairing_state pairing_state = UNPAIRED;
+
+enum bss_client_show_state
+{
+    UNINITIALIZED,
+    INIT,
+    SHOW,
+};
+enum bss_client_show_state show_state = UNINITIALIZED;
 
 enum bss_client_buzzer_state
 {
@@ -69,15 +78,16 @@ SemaphoreHandle_t xMutex = NULL;
 
 void on_data_sent(const uint8_t *mac, esp_now_send_status_t status)
 {
-    // Serial.print("\r\nLast Packet Send Status:\n");
-    // Serial.printf("time needed to send: %i\n", millis() - send_time);
-    // Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
-
-    // Serial.printf("msg delivered: %i\n", millis() - send_time);
+    if (status == ESP_NOW_SEND_SUCCESS && pairing_state == PAIRED && mac_equal(mac, controller_mac))
+    {
+        last_sucessful_msg_to_master = millis();
+    }
 }
 
 void go_to_sleep()
 {
+    Serial.println("go to sleep now!");
+
     fill_solid(leds, LED_NUM, CRGB::Black);
     FastLED.show();
     digitalWrite(ACTIVATION_5V_PIN, LOW);
@@ -183,8 +193,15 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
             switch (start_ptr[2])
             {
             case BSS_MSG_WAKEUP_ACCEPTED:
-                if (memcmp(mac, controller_mac, 6) == 0)
-                    wakeup = true;
+                Serial.println("wakeup accepted");
+                if (mac_equal(mac, controller_mac))
+                {
+                    show_state = INIT;
+
+                    fill_solid(leds, LED_NUM, CRGB::Green);
+                    FastLED.show();
+                }
+
                 break;
 
             case BSS_MSG_SET_NEOPIXEL_COLOR:
@@ -219,6 +236,8 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
                         nvs_commit(nvs_bss_handle);
                         nvs_close(nvs_bss_handle);
                     }
+
+                    show_state = INIT;
 
                     fill_solid(leds, LED_NUM, CRGB::Green);
                     FastLED.show();
@@ -312,6 +331,12 @@ void setup()
     }
     Serial.println();
 
+    Serial.printf("ID: %i\n", my_id);
+    Serial.print("MAC: ");
+    print_mac(my_mac);
+
+    xMutex = xSemaphoreCreateMutex();
+
     esp_now_register_recv_cb(on_data_recv);
     esp_now_register_send_cb(on_data_sent);
 
@@ -337,31 +362,26 @@ void setup()
             msg_buf[2] = BSS_MSG_WAKEUP_REQUEST;
             send_msg(controller_mac, msg_buf, 3);
 
-            while (millis() <= 100)
-            {
-                if (wakeup)
-                    break;
-            }
-
-            if (!wakeup)
-                go_to_sleep();
+            app.onDelay(1000, []()
+                        {
+                            if(show_state == UNINITIALIZED)
+                                go_to_sleep(); });
         }
     }
-
-    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, LED_NUM).setCorrection(TypicalLEDStrip);
-    FastLED.setBrightness(BRIGHTNESS);
 
     pinMode(BUZZER_PIN, INPUT);
     pinMode(ACTIVATION_5V_PIN, OUTPUT);
     digitalWrite(ACTIVATION_5V_PIN, HIGH);
 
-    if (wakeup)
-        fill_solid(leds, LED_NUM, CRGB::Green);
-    // fill_solid(leds, LED_NUM, CRGB::Yellow);
-    // else
-    FastLED.show();
+    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, LED_NUM).setCorrection(TypicalLEDStrip);
+    FastLED.setBrightness(BRIGHTNESS);
 
-    xMutex = xSemaphoreCreateMutex();
+    if (wakeup_cause == ESP_SLEEP_WAKEUP_EXT0)
+        fill_solid(leds, LED_NUM, CRGB::Yellow);
+    else
+        fill_solid(leds, LED_NUM, CRGB::Black);
+
+    FastLED.show();
 
     Serial.println("Starting now...");
     Serial.println(wakeup_cause);
@@ -389,6 +409,8 @@ void loop()
                 buzzer_state = PRESSED;
             }
 
+            last_pressed = millis();
+
             if (pairing_state == PAIRED)
             {
                 msg_buf[0] = my_id;
@@ -396,12 +418,9 @@ void loop()
                 msg_buf[2] = BSS_MSG_BUZZER_PRESSED;
                 send_msg(controller_mac, msg_buf, 3);
             }
-
-            last_pressed = millis();
         }
         else if (!buzzer_pin_state && buzzer_pin_state_old)
         {
-
             if ((millis() - last_released) >= 10)
             {
                 Serial.println("buzzer released");
@@ -418,38 +437,35 @@ void loop()
 
         if (pairing_state != PAIRING_MODE)
         {
-            if (buzzer_state == PRESSED)
-            {
-                fill_solid(leds, LED_NUM, CRGB::Yellow);
-                FastLED.show();
-            }
+            if (show_state == UNINITIALIZED && buzzer_state == UNPRESSED && (millis() - last_pressed) > 1 sec)
+            go_to_sleep();
             else if (buzzer_state == HOLD && (millis() - last_pressed) >= 3 sec)
+        {
+            pairing_state = PAIRING_MODE;
+
+            esp_err_t err = nvs_open("bss_client", NVS_READWRITE, &nvs_bss_handle);
+            if (err == ESP_OK)
             {
-                pairing_state = PAIRING_MODE;
+                nvs_set_u8(nvs_bss_handle, "paired", false);
 
-                esp_err_t err = nvs_open("bss_client", NVS_READWRITE, &nvs_bss_handle);
-                if (err == ESP_OK)
-                {
-                    nvs_set_u8(nvs_bss_handle, "paired", false);
+                nvs_commit(nvs_bss_handle);
+                nvs_close(nvs_bss_handle);
+            }
 
-                    nvs_commit(nvs_bss_handle);
-                    nvs_close(nvs_bss_handle);
-                }
-
-                if (pairing_disable_delay == NULL)
-                {
-                    pairing_disable_delay = app.onDelay(10 sec, []()
-                                                        {
+            if (pairing_disable_delay == NULL)
+            {
+                pairing_disable_delay = app.onDelay(10 sec, []()
+                                                    {
                                                             if (pairing_state != PAIRED)
                                                                 go_to_sleep();
 
                                                             pairing_disable_delay = NULL; });
-                }
+            }
 
-                if (pairing_loop == NULL)
-                {
-                    pairing_loop = app.onRepeat(1 sec, []()
-                                                {
+            if (pairing_loop == NULL)
+            {
+                pairing_loop = app.onRepeat(1 sec, []()
+                                            {
                                                     static bool led_state = true;
 
                                                     led_state = !led_state;
@@ -469,13 +485,11 @@ void loop()
                                                     msg_buf[2] = BSS_MSG_PAIRING_REQUEST;
 
                                                     send_msg(broadcast_mac, msg_buf, 3); });
-                }
-
-                fill_solid(leds, LED_NUM, CRGB::White);
-                FastLED.show();
             }
-            else if (buzzer_state == UNPRESSED && (millis() - last_pressed) > 1 sec)
-                go_to_sleep();
+
+            fill_solid(leds, LED_NUM, CRGB::White);
+            FastLED.show();
+            }
         }
 
         app.tick();

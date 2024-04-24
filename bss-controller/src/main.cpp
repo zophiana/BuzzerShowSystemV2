@@ -119,7 +119,7 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
 
         while (current_client != NULL)
         {
-            if (current_client->id == id && memcmp(mac, current_client->mac, 6) == 0)
+            if (current_client->id == id && mac_equal(mac, current_client->mac))
             {
                 current_client->last_msg = millis();
                 break;
@@ -133,7 +133,7 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
 
         if (current_client != NULL)
         {
-            Serial.println(memcmp(mac, current_client->mac, 6));
+            Serial.println(mac_equal(mac, current_client->mac));
             print_mac(current_client->mac);
             Serial.println(current_client->id);
         }
@@ -200,21 +200,27 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
         }
         else if (data[2] == BSS_MSG_WAKEUP_REQUEST)
         {
+            Serial.println("wakeup request");
+
             if (pairing_mode && current_client != NULL)
             {
+                Serial.println("accepted");
                 msg_buf[0] = id;
                 msg_buf[1] = 1;
                 msg_buf[2] = BSS_MSG_WAKEUP_ACCEPTED;
 
                 send_msg(current_client->mac, msg_buf, 3);
             }
-            else if (current_client == NULL)
+            else if (current_client == NULL && !mac_equal(mac, broadcast_mac))
             {
+                Serial.println("declined");
+                print_mac(mac);
+
                 msg_buf[0] = id;
                 msg_buf[1] = 1;
                 msg_buf[2] = BSS_MSG_PAIRING_REMOVE;
 
-                send_msg(current_client->mac, msg_buf, 3);
+                send_msg(mac, msg_buf, 3);
             }
         }
 

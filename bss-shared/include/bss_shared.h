@@ -32,4 +32,9 @@ inline void mac_copy(uint8_t *dest, const uint8_t *source)
   memcpy(dest, source, MAC_SIZE);
 }
 
+inline bool mac_equal(const uint8_t *mac_1, const uint8_t *mac_2)
+{
+  return memcmp(mac_1, mac_2, MAC_SIZE) == 0;
+}
+
 #endif
