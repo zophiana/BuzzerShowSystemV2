@@ -37,9 +37,61 @@ SemaphoreHandle_t xMutex = NULL;
 
 bool buzzer_pressed = false;
 
-#define PAIRING_BUTTON D9
+#define RIGHT_BUTTON D9
 #define RESET_BUTTON D8
 #define WRONG_BUTTON D7
+
+enum bss_button_state
+{
+    UNPRESSED = 0,
+    PRESSED = 2,
+    HOLD = 1,
+    RELEASED = 3,
+};
+
+class BssButton
+{
+private:
+    bool pin_state = false;
+    bool pin_state_old = false;
+    uint8_t pin;
+
+public:
+    ulong last_pressed = 0;
+    ulong last_released = 0;
+    bss_button_state state = UNPRESSED;
+    bool locked = false;
+
+    BssButton(uint8_t pin) : pin(pin) {}
+
+    // This function does not return the current state, as this would encourage
+    // multiple calls in the loop, skipping the 'PRESSED' or 'RELEASED' states
+    // after the second call.
+    void read()
+    {
+        pin_state_old = pin_state;
+        pin_state = !digitalRead(pin);
+
+        if (pin_state && !pin_state_old)
+        {
+            if ((millis() - last_pressed) >= 10)
+                state = PRESSED;
+
+            last_pressed = millis();
+        }
+        else if (!pin_state && pin_state_old)
+        {
+            if ((millis() - last_released) >= 10)
+                state = RELEASED;
+
+            last_released = millis();
+        }
+        else if (pin_state && pin_state_old)
+            state = HOLD;
+        else // !pin_state && !pin_state_old
+            state = UNPRESSED;
+    }
+};
 
 bool pairing_mode = false;
 
@@ -257,90 +309,9 @@ void setup()
     Serial.println();
 
     pinMode(D10, OUTPUT);
-    pinMode(PAIRING_BUTTON, INPUT_PULLUP);
+    pinMode(RIGHT_BUTTON, INPUT_PULLUP);
     pinMode(RESET_BUTTON, INPUT_PULLUP);
     pinMode(WRONG_BUTTON, INPUT_PULLUP);
-
-    app.onInterrupt(PAIRING_BUTTON, RISING, []()
-                    { 
-                        static ulong last_pressed = 0;
-
-                        if ((millis() - last_pressed) >= 250) {
-                            last_pressed = millis();
-
-                            if (!buzzer_pressed) {
-                                static reactesp::RepeatReaction *react_blink = NULL;
-                                pairing_mode = !pairing_mode;
-
-                                if (pairing_mode && react_blink == NULL) {
-                                    digitalWrite(D10, true);
-                                    react_blink = app.onRepeat(1000, [](){blink(D10, false); });
-                                }
-                                else if (!pairing_mode && react_blink != NULL) {
-                                    digitalWrite(D10, false);
-                                    
-                                    react_blink->remove();
-                                    react_blink = NULL;
-                                }
-                            } else {
-                                uint8_t i = 0;
-                                client_struct *client = clients;
-
-                                for (; client != NULL; i += 6)
-                                {
-                                    fill_msg_buf(&msg_buf[i], client->id, {0, 255, 0});
-                                    client = client->next;
-                                }
-
-                                send_msg(broadcast_mac, msg_buf, i);
-                            }
-                        } });
-
-    app.onInterrupt(RESET_BUTTON, RISING, []()
-                    {
-                        static ulong last_pressed = 0;
-
-                        if ((millis() - last_pressed) >= 250) {
-                            last_pressed = millis();
-
-                            if (buzzer_pressed)
-                            {
-                                buzzer_pressed = false;
-
-                                uint8_t i = 0;
-                                client_struct *client = clients;
-
-                                for (; client != NULL; i += 6)
-                                {
-                                    fill_msg_buf(&msg_buf[i], client->id, {0, 0, 0});
-                                    client = client->next;
-                                }
-
-                                send_msg(broadcast_mac, msg_buf, i);
-                            }
-                        } });
-
-    app.onInterrupt(WRONG_BUTTON, RISING, []()
-                    {
-                        static ulong last_pressed = 0;
-
-                        if ((millis() - last_pressed) >= 250) {
-                            last_pressed = millis();
-
-                            if (buzzer_pressed)
-                            {
-                                uint8_t i = 0;
-                                client_struct *client = clients;
-
-                                for (; client != NULL; i += 6)
-                                {
-                                    fill_msg_buf(&msg_buf[i], client->id, {255, 0, 0});
-                                    client = client->next;
-                                }
-
-                                send_msg(broadcast_mac, msg_buf, i);
-                            }
-                        } });
 
     xMutex = xSemaphoreCreateMutex();
 
@@ -359,6 +330,84 @@ void loop()
 {
     if (xSemaphoreTake(xMutex, 10))
     {
+        static BssButton rightButton(RIGHT_BUTTON);
+        static BssButton resetButton(RESET_BUTTON);
+        static BssButton wrongButton(WRONG_BUTTON);
+
+        rightButton.read();
+        resetButton.read();
+        wrongButton.read();
+
+        if (rightButton.state == PRESSED)
+        {
+            if (!buzzer_pressed)
+            {
+                static reactesp::RepeatReaction *react_blink = NULL;
+                pairing_mode = !pairing_mode;
+
+                if (pairing_mode && react_blink == NULL)
+                {
+                    digitalWrite(D10, true);
+                    react_blink = app.onRepeat(1000, []()
+                                               { blink(D10, false); });
+                }
+                else if (!pairing_mode && react_blink != NULL)
+                {
+                    digitalWrite(D10, false);
+
+                    react_blink->remove();
+                    react_blink = NULL;
+                }
+            }
+            else
+            {
+                uint8_t i = 0;
+                client_struct *client = clients;
+
+                for (; client != NULL; i += 6)
+                {
+                    fill_msg_buf(&msg_buf[i], client->id, {0, 255, 0});
+                    client = client->next;
+                }
+
+                send_msg(broadcast_mac, msg_buf, i);
+            }
+        }
+        else if (resetButton.state == PRESSED)
+        {
+            if (buzzer_pressed)
+            {
+                buzzer_pressed = false;
+
+                uint8_t i = 0;
+                client_struct *client = clients;
+
+                for (; client != NULL; i += 6)
+                {
+                    fill_msg_buf(&msg_buf[i], client->id, {0, 0, 0});
+                    client = client->next;
+                }
+
+                send_msg(broadcast_mac, msg_buf, i);
+            }
+        }
+        else if (wrongButton.state == PRESSED)
+        {
+            if (buzzer_pressed)
+            {
+                uint8_t i = 0;
+                client_struct *client = clients;
+
+                for (; client != NULL; i += 6)
+                {
+                    fill_msg_buf(&msg_buf[i], client->id, {255, 0, 0});
+                    client = client->next;
+                }
+
+                send_msg(broadcast_mac, msg_buf, i);
+            }
+        }
+
         app.tick();
 
         client_struct *current_client = clients;
