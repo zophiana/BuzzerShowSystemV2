@@ -69,7 +69,6 @@ enum bss_client_buzzer_state
     RELEASED,
 };
 
-bool wakeup = false;
 esp_sleep_wakeup_cause_t wakeup_cause;
 
 nvs_handle_t nvs_bss_handle;
@@ -205,11 +204,14 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
                 break;
 
             case BSS_MSG_SET_NEOPIXEL_COLOR:
-                CRGB neopixel_color;
-                neopixel_color.setRGB(start_ptr[3], start_ptr[4], start_ptr[5]);
+                if (mac_equal(mac, controller_mac))
+                {
+                    CRGB neopixel_color;
+                    neopixel_color.setRGB(start_ptr[3], start_ptr[4], start_ptr[5]);
 
-                fill_solid(leds, LED_NUM, neopixel_color);
-                FastLED.show();
+                    fill_solid(leds, LED_NUM, neopixel_color);
+                    FastLED.show();
+                }
                 break;
 
             case BSS_MSG_PAIRING_ACCEPTED:
@@ -410,14 +412,6 @@ void loop()
             }
 
             last_pressed = millis();
-
-            if (pairing_state == PAIRED)
-            {
-                msg_buf[0] = my_id;
-                msg_buf[1] = 1;
-                msg_buf[2] = BSS_MSG_BUZZER_PRESSED;
-                send_msg(controller_mac, msg_buf, 3);
-            }
         }
         else if (!buzzer_pin_state && buzzer_pin_state_old)
         {
@@ -434,8 +428,14 @@ void loop()
             buzzer_state = HOLD;
         else //(!buzzer_pin_state && !buzzer_pin_state_old)
             buzzer_state = UNPRESSED;
-
-        if (pairing_state != PAIRING_MODE)
+        if (pairing_state == PAIRED)
+        {
+            msg_buf[0] = my_id;
+            msg_buf[1] = 1;
+            msg_buf[2] = BSS_MSG_BUZZER_PRESSED;
+            send_msg(controller_mac, msg_buf, 3);
+        }
+        else if (pairing_state != PAIRING_MODE)
         {
             if (show_state == UNINITIALIZED && buzzer_state == UNPRESSED && (millis() - last_pressed) > 1 sec)
             go_to_sleep();
