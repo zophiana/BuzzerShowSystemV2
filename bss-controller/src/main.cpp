@@ -340,26 +340,7 @@ void loop()
 
         if (rightButton.state == PRESSED)
         {
-            if (!buzzer_pressed)
-            {
-                static reactesp::RepeatReaction *react_blink = NULL;
-                pairing_mode = !pairing_mode;
-
-                if (pairing_mode && react_blink == NULL)
-                {
-                    digitalWrite(D10, true);
-                    react_blink = app.onRepeat(1000, []()
-                                               { blink(D10, false); });
-                }
-                else if (!pairing_mode && react_blink != NULL)
-                {
-                    digitalWrite(D10, false);
-
-                    react_blink->remove();
-                    react_blink = NULL;
-                }
-            }
-            else
+            if (buzzer_pressed)
             {
                 uint8_t i = 0;
                 client_struct *client = clients;
@@ -372,6 +353,31 @@ void loop()
 
                 send_msg(broadcast_mac, msg_buf, i);
             }
+        }
+        else if (rightButton.state == HOLD && (millis() - rightButton.last_pressed) >= 2 sec && !rightButton.locked)
+        {
+            rightButton.locked = true;
+
+            static reactesp::RepeatReaction *react_blink = NULL;
+            pairing_mode = !pairing_mode;
+
+            if (pairing_mode && react_blink == NULL)
+            {
+                digitalWrite(D10, true);
+                react_blink = app.onRepeat(1000, []()
+                                           { blink(D10, false); });
+            }
+            else if (!pairing_mode && react_blink != NULL)
+            {
+                digitalWrite(D10, false);
+
+                react_blink->remove();
+                react_blink = NULL;
+            }
+        }
+        else if (rightButton.state == RELEASED)
+        {
+            rightButton.locked = false;
         }
         else if (resetButton.state == PRESSED)
         {
