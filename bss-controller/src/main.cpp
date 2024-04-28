@@ -116,6 +116,7 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
     {
         uint8_t id = data[0];
         client_struct *current_client = clients;
+        client_struct *last_client = NULL;
 
         while (current_client != NULL)
         {
@@ -125,6 +126,7 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
                 break;
             }
 
+            last_client = current_client;
             current_client = current_client->next;
         }
 
@@ -221,6 +223,21 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
                 msg_buf[2] = BSS_MSG_PAIRING_REMOVE;
 
                 send_msg(mac, msg_buf, 3);
+            }
+        }
+        else if (data[2] == BSS_MSG_PAIRING_REMOVE)
+        {
+            if (current_client != NULL)
+            {
+                if (esp_now_is_peer_exist(mac))
+                    esp_now_del_peer(mac);
+
+                if (last_client != NULL)
+                    last_client->next = current_client->next;
+                else
+                    clients = current_client->next;
+
+                free(current_client);
             }
         }
 
