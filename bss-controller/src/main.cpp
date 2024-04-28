@@ -70,31 +70,6 @@ void send_msg(const uint8_t *mac_addr, const uint8_t *data, const uint8_t size)
     }
 }
 
-void add_client(client_struct *client)
-{
-    if (clients == NULL)
-    {
-        clients = client;
-        return;
-    }
-
-    client_struct *head = clients;
-
-    while (head->next != NULL)
-        head = head->next;
-
-    head->next = client;
-}
-
-void add_peer(esp_now_peer_info_t *peer_info, uint8_t *peer_mac)
-{
-    mac_copy(peer_info->peer_addr, peer_mac);
-    peer_info->channel = BSS_ESP_NOW_CHANNEL;
-    peer_info->encrypt = BSS_ESP_NOW_ENCRYPT;
-
-    esp_now_add_peer(peer_info);
-}
-
 void print_mac(const uint8_t *mac)
 {
     Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], mac[6]);
@@ -187,7 +162,19 @@ void on_data_recv(const uint8_t *mac, const uint8_t *data, int len)
                     new_client->peer.channel = BSS_ESP_NOW_CHANNEL;
                     new_client->peer.encrypt = BSS_ESP_NOW_ENCRYPT;
 
-                    add_client(new_client);
+                    if (clients == NULL)
+                    {
+                        clients = new_client;
+                    }
+                    else
+                    {
+                        client_struct *head = clients;
+
+                        while (head->next != NULL)
+                            head = head->next;
+
+                        head->next = new_client;
+                    }
 
                     current_client = new_client;
                 }
